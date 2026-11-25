@@ -28,6 +28,14 @@ class ShieldSheet(private val activity: BrowserActivity) {
             updateSummary()
         }
 
+        binding.siteLockSwitch.isChecked = activity.prefs.siteLockEnabled
+        binding.siteLockSwitch.setOnCheckedChangeListener { _, checked ->
+            activity.setSiteLock(checked)
+            updateSiteLockRow()
+            updateSummary()
+        }
+        updateSiteLockRow()
+
         addToggle(
             R.string.blocked_popups,
             R.string.blocked_popups_desc,
@@ -128,6 +136,20 @@ class ShieldSheet(private val activity: BrowserActivity) {
         }
     }
 
+    private fun updateSiteLockRow() {
+        val tab = activity.tabManager.active
+        val key = if (tab == null || tab.isHome) {
+            null
+        } else {
+            tab.lockedSite ?: Urls.siteKeyOfUrl(tab.url)
+        }
+        binding.siteLockTarget.text = when {
+            !activity.prefs.siteLockEnabled -> activity.getString(R.string.site_lock_off)
+            key != null -> activity.getString(R.string.site_lock_target, key)
+            else -> activity.getString(R.string.site_lock_next)
+        }
+    }
+
     private fun updateSummary() {
         val summary = when {
             !activity.prefs.shieldEnabled -> activity.getString(R.string.shield_global_off)
@@ -168,5 +190,6 @@ class ShieldSheet(private val activity: BrowserActivity) {
         NavigationShield.Kind.POPUP -> activity.getString(R.string.kind_popup)
         NavigationShield.Kind.REDIRECT -> activity.getString(R.string.kind_redirect)
         NavigationShield.Kind.APP_LINK -> activity.getString(R.string.kind_app_link)
+        NavigationShield.Kind.SITE_LOCK -> activity.getString(R.string.kind_site_lock)
     }
 }

@@ -11,6 +11,16 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("shield_enabled", true)
         set(value) = sp.edit().putBoolean("shield_enabled", value).apply()
 
+    /**
+     * Strict "never leave this site" mode. Independent of [shieldEnabled]: it
+     * blocks every main-frame navigation away from the tab's locked site, even
+     * when the navigation comes from a real tap (for example a hidden ad
+     * overlay on top of a video player).
+     */
+    var siteLockEnabled: Boolean
+        get() = sp.getBoolean("site_lock_enabled", false)
+        set(value) = sp.edit().putBoolean("site_lock_enabled", value).apply()
+
     var shieldPopups: Boolean
         get() = sp.getBoolean("shield_popups", true)
         set(value) = sp.edit().putBoolean("shield_popups", value).apply()

@@ -74,6 +74,15 @@ class MenuSheet(private val activity: BrowserActivity) {
         }
 
         addRow(
+            icon = R.drawable.ic_lock,
+            titleRes = R.string.site_lock,
+            switch = true,
+            checked = activity.prefs.siteLockEnabled
+        ) { checked ->
+            activity.setSiteLock(checked)
+        }
+
+        addRow(
             icon = R.drawable.ic_settings,
             titleRes = R.string.menu_settings
         ) {

@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -17,17 +20,61 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # The project may sit at the repository root or inside an AegisBrowser/
+      # folder, depending on how it was uploaded. Find the Gradle wrapper once
+      # and use that directory for every later step.
+      - name: Locate Gradle project
+        id: locate
+        shell: bash
+        run: |
+          if [ -f gradlew ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f AegisBrowser/gradlew ]; then
+            echo "dir=AegisBrowser" >> "$GITHUB_OUTPUT"
+          else
+            echo "gradlew not found at the repository root or in AegisBrowser/" >&2
+            find . -maxdepth 3 -name gradlew -print >&2
+            exit 1
+          fi
 
-      - name: Make gradlew executable
-        run: chmod +x gradlew
+      # GitHub-hosted Ubuntu runners already include the Android SDK. We only
+      # need to make sure the compile SDK / build tools are present. We do this
+      # directly instead of using setup-android, which tries to install the
+      # long-removed "tools" package and fails on current SDK repositories.
+      - name: Prepare Android SDK
+        shell: bash
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: |
+          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -z "$SDK_DIR" ] || [ ! -d "$SDK_DIR" ]; then
+            echo "Android SDK directory not found" >&2
+            exit 1
+          fi
+          echo "sdk.dir=$SDK_DIR" > local.properties
+
+          SDKMANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK_DIR/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -1)
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found" >&2
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_DIR" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK_DIR" --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: AegisBrowser-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ steps.locate.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

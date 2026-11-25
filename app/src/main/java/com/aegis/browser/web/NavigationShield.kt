@@ -15,7 +15,7 @@ import com.aegis.browser.core.Urls
  */
 class NavigationShield(private val prefs: Prefs) {
 
-    enum class Kind { POPUP, REDIRECT, APP_LINK }
+    enum class Kind { POPUP, REDIRECT, APP_LINK, SITE_LOCK }
 
     data class Blocked(
         val url: String,
@@ -26,6 +26,7 @@ class NavigationShield(private val prefs: Prefs) {
 
     var onBlocked: ((Blocked) -> Unit)? = null
     var onPopupBlocked: (() -> Unit)? = null
+    var onSiteLockBlocked: ((Blocked) -> Unit)? = null
 
     var currentUrl: String? = null
         private set
@@ -72,9 +73,14 @@ class NavigationShield(private val prefs: Prefs) {
 
     fun isAllowlisted(host: String?): Boolean = prefs.isSiteAllowed(host)
 
-    /** JavaScript that flips the in-page switch without a reload. */
-    fun runtimeScript(url: String?): String =
-        ShieldScripts.runtimeFlag(isEnabledFor(Urls.host(url)))
+    /** JavaScript that flips the in-page switches without a reload. */
+    fun runtimeScript(url: String?, siteLockKey: String?): String =
+        ShieldScripts.runtimeConfig(
+            isEnabledFor(Urls.host(url)),
+            prefs.allowedSites,
+            prefs.siteLockEnabled && !siteLockKey.isNullOrBlank(),
+            siteLockKey.orEmpty()
+        )
 
     /**
      * Called from shouldOverrideUrlLoading. Returning a non-null value means the
@@ -162,6 +168,22 @@ class NavigationShield(private val prefs: Prefs) {
         recent.addFirst(item)
         while (recent.size > 12) recent.removeLast()
         onPopupBlocked?.invoke()
+    }
+
+    /**
+     * Records a navigation that Site Lock stopped. Unlike the shield this
+     * ignores gestures entirely: even a real tap on a hidden ad overlay is
+     * refused, which is the whole point of the strict mode.
+     */
+    fun notifySiteLockBlocked(url: String, lockedSite: String): Blocked {
+        sessionBlocked++
+        prefs.blockedTotal = prefs.blockedTotal + 1
+        val host = Urls.host(url) ?: "pop-up"
+        val item = Blocked(url, host, Kind.SITE_LOCK, lockedSite)
+        recent.addFirst(item)
+        while (recent.size > 12) recent.removeLast()
+        onSiteLockBlocked?.invoke(item)
+        return item
     }
 
     fun resetStats() {

@@ -31,6 +31,11 @@ class BrowserChrome(
         isUserGesture: Boolean,
         resultMsg: Message
     ): Boolean {
+        if (activity.isSiteLockEnabled()) {
+            // Site Lock treats every pop-up as an attempt to leave the site.
+            activity.onSiteLockBlocked(tab, "")
+            return false
+        }
         if (shield.canBlockPopups(view.url)) {
             shield.notifyPopupBlocked(view.url)
             return false

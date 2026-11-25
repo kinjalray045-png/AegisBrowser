@@ -103,6 +103,19 @@
     <string name="allowed_site_removed">Site removed from allowlist</string>
     <string name="allowed_site_added">Site allowed</string>
 
+    <!-- Strict Site Lock, independent of the shield. -->
+    <string name="site_lock">Site Lock</string>
+    <string name="site_lock_desc">Stays on this site no matter what. Every attempt to leave — including a tap on a hidden ad over a video player — is blocked. Same-site links still work.</string>
+    <string name="site_lock_blocked">Site Lock kept you on %1$s</string>
+    <string name="site_lock_unlock">Unlock</string>
+    <string name="site_lock_target">Locked to %1$s</string>
+    <string name="site_lock_off">Not locked. Turn on to stay on this site.</string>
+    <string name="site_lock_next">Waiting for the first page. The next site you open will be locked.</string>
+    <string name="site_lock_on_toast">Site Lock on: staying on %1$s</string>
+    <string name="site_lock_on_pending">Site Lock on: the next site you open will be locked</string>
+    <string name="site_lock_off_toast">Site Lock off</string>
+    <string name="this_site">this site</string>
+
     <string name="settings_privacy">Privacy and security</string>
     <string name="settings_browsing">Browsing</string>
     <string name="settings_appearance">Appearance</string>
@@ -230,6 +243,7 @@
     <string name="kind_redirect">Redirect</string>
     <string name="kind_app_link">App link</string>
     <string name="kind_popup">Pop-up</string>
+    <string name="kind_site_lock">Site Lock</string>
     <string name="preparing_download">Preparing download…</string>
     <string name="download_status_pending">Waiting to start</string>
     <string name="download_status_running">Downloading</string>

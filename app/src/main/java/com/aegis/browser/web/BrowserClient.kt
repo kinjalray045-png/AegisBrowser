@@ -37,6 +37,20 @@ class BrowserClient(
             return true
         }
 
+        if (request.isForMainFrame) {
+            if (tab.allowSiteLockOnce) {
+                // The user pressed Back/Forward. Let the navigation happen and
+                // re-anchor Site Lock to whatever page they land on.
+                tab.allowSiteLockOnce = false
+                tab.lockedSite = null
+                tab.lockedUrl = null
+            } else if (activity.isSiteLockBlocked(tab, url)) {
+                view.stopLoading()
+                activity.onSiteLockBlocked(tab, url)
+                return true
+            }
+        }
+
         if (shield.shouldBlock(request) != null) {
             view.stopLoading()
             return true

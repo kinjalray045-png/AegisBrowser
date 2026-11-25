@@ -1,6 +1,6 @@
 # Aegis Browser
 
-A full-featured Android browser built on **Android System WebView**, with one headline feature: the **Aegis Shield**, an on/off switch that stops a page from opening pop-ups or redirecting you to other websites, links or URLs.
+A full-featured Android browser built on **Android System WebView**, with two headline features: the **Aegis Shield**, which stops a page from opening pop-ups or redirecting you to other websites, and **Site Lock**, a separate strict switch that keeps a tab on its current site no matter what.
 
 Everything runs locally on the device. There is no account, no sync service and no analytics.
 
@@ -18,7 +18,27 @@ The shield button in the top-left corner (or **Menu → Shield**) opens the shie
 - **Allow list** — permanently exempt sites you trust.
 - **Counters and recent blocks** — see what was stopped, with an **Allow** action on the block notification.
 
-**User taps still work.** The shield distinguishes a real user gesture from an automatic navigation, and keeps a short "gesture budget" so a link that goes through a search engine, short-link service or OAuth redirect chain still reaches its destination. Same-site navigation is never blocked.
+**User taps still work.** The shield distinguishes a real user gesture from an automatic navigation, and keeps a short "gesture budget" so a link that goes through a search engine, short-link service or OAuth redirect chain still reaches its destination. Same-site navigation is never blocked. If you want taps to be stopped too, use Site Lock below.
+
+### Site Lock (strict "never leave this site")
+
+Site Lock is a second, independent switch for a stricter promise: **this tab will not leave the site it is on, no matter what** — even when the navigation comes from a real tap.
+
+It exists for pages that hide transparent ad overlays on top of their controls. When you try to pause a video or change a player setting, the tap lands on an invisible ad link instead. With Site Lock on, that tap is cancelled.
+
+- Turn it on from **Menu → Site Lock**, the switch at the top of the shield panel, or **Settings → Privacy and security**.
+- It locks the tab to the site it is on at that moment (registrable domain, so `m.example.com` and `www.example.com` count as the same site).
+- While locked, cross-site links, address-bar and bookmark navigation to another site, pop-ups, redirects, meta refreshes, app links and `window.open` are all refused.
+- Same-site navigation, Back/Forward and reload still work. Back/Forward moves the lock to the page you land on.
+- Every block shows **Site Lock kept you on example.com** with an **Unlock** action. Unlock does not follow the blocked link.
+- Going to the Home page clears the lock target so the next site you open becomes the new target.
+- Site Lock works independently of the shield: either one can be on without the other.
+
+The strict mode has three layers, in order:
+
+1. A capture-phase click handler in the document-start script cancels taps on links that point to another site, before the page's own handlers can react.
+2. Native interception in `WebViewClient.shouldOverrideUrlLoading` cancels cross-site main-frame navigations (including those started by JavaScript or a server redirect) and app schemes.
+3. A page-start backstop stops a cross-site load that somehow slipped through, and restores the last page on the locked site.
 
 The shield has two layers:
 
@@ -87,5 +107,5 @@ Push the folder to a new GitHub repository (or use the repository root as the pr
 
 - Minimum Android version is 7.0 (API 24); the build targets Android 15 (API 35).
 - The app uses the device's WebView implementation. WebView version is shown in **Settings → About**.
-- The shield is a navigation guard, not an ad blocker or a sandbox. It cannot inspect encrypted traffic or stop a page from changing its own content without navigating.
+- The shield is a navigation guard, not an ad blocker or a sandbox. It cannot inspect encrypted traffic or stop a page from changing its own content without navigating. Site Lock likewise stops *leaving* a site; it does not remove an overlay that stays on the same site.
 - Releases are unsigned debug builds unless you add your own signing configuration.

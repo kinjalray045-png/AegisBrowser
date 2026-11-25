@@ -68,6 +68,7 @@ import com.aegis.browser.web.HomeBridge
 import com.aegis.browser.web.HomePage
 import com.aegis.browser.web.NavigationShield
 import com.aegis.browser.web.ShieldScripts
+import com.aegis.browser.web.SiteLockBridge
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import java.util.UUID
@@ -101,10 +102,12 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
     private var currentFullscreenView: View? = null
     private var currentFullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private var lastBackAt = 0L
+    private var lastSiteLockNoticeAt = 0L
 
     private val settingsLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
+        syncSiteLockFromPrefs()
         applyPrefsToAllTabs()
         updateShieldIcon()
         updateBookmarkIcon()
@@ -165,6 +168,7 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
         shield = NavigationShield(prefs)
         shield.onBlocked = { showBlockedSnackbar(it) }
         shield.onPopupBlocked = { showPopupBlockedSnackbar() }
+        shield.onSiteLockBlocked = { showSiteLockSnackbar(it) }
 
         tabManager = TabManager(binding.webContainer, this)
         findBar = FindBar(this, binding) { tabManager.activeWebView }
@@ -217,7 +221,10 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
         binding.forwardButton.setOnClickListener {
             hideSuggestions()
             val view = tabManager.activeWebView
-            if (view?.canGoForward() == true) view.goForward()
+            if (view?.canGoForward() == true) {
+                if (prefs.siteLockEnabled) tabManager.active?.allowSiteLockOnce = true
+                view.goForward()
+            }
         }
         binding.homeButton.setOnClickListener {
             hideSuggestions()
@@ -284,7 +291,10 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
             currentFullscreenView != null -> exitFullscreen()
             findBar.isVisible -> findBar.hide()
             suggestions.isShowing -> suggestions.hide()
-            tabManager.activeWebView?.canGoBack() == true -> tabManager.activeWebView?.goBack()
+            tabManager.activeWebView?.canGoBack() == true -> {
+                if (prefs.siteLockEnabled) tabManager.active?.allowSiteLockOnce = true
+                tabManager.activeWebView?.goBack()
+            }
             else -> {
                 val now = System.currentTimeMillis()
                 if (now - lastBackAt < 2_000) {
@@ -332,6 +342,7 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
         val tab = tabManager.active
         val view = tab?.webView
         if (view?.canGoBack() == true) {
+            if (prefs.siteLockEnabled && tab != null) tab.allowSiteLockOnce = true
             view.goBack()
             return
         }
@@ -359,6 +370,11 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
         tab.isHome = true
         tab.url = Urls.HOME_URL
         tab.title = getString(R.string.tab_title_new)
+        // Home is a fresh start: the next real site becomes the Site Lock target.
+        tab.lockedSite = null
+        tab.lockedUrl = null
+        tab.allowSiteLockOnce = false
+        tab.siteLockRestoring = false
         tab.webView?.loadDataWithBaseURL(
             Urls.HOME_URL,
             html,
@@ -390,6 +406,12 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
         val tab = tabManager.active
         if (tab == null) {
             createTab(url = url)
+            return
+        }
+
+        if (isSiteLockBlocked(tab, url)) {
+            onSiteLockBlocked(tab, url)
+            updateAddressBar()
             return
         }
 
@@ -673,9 +695,136 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
         tabManager.tabs.forEach { tab ->
             val view = tab.webView ?: return@forEach
             installShieldScripts(tab, view)
-            view.evaluateJavascript(shield.runtimeScript(tab.url), null)
+            pushRuntimeConfig(tab, view)
         }
         updateShieldIcon()
+    }
+
+    /**
+     * Turns the strict Site Lock on or off. This is independent of the shield:
+     * while it is on, the tab cannot navigate to another site at all, even when
+     * the navigation comes from a real tap on a hidden ad overlay.
+     */
+    fun setSiteLock(enabled: Boolean) {
+        prefs.siteLockEnabled = enabled
+        tabManager.tabs.forEach { tab ->
+            if (!enabled) {
+                tab.lockedSite = null
+                tab.lockedUrl = null
+                tab.allowSiteLockOnce = false
+                tab.siteLockRestoring = false
+            } else if (tab.lockedSite == null && !tab.isHome && Urls.isHttp(tab.url)) {
+                tab.lockedSite = Urls.siteKeyOfUrl(tab.url)
+                tab.lockedUrl = tab.url
+            }
+        }
+        tabManager.tabs.forEach { tab ->
+            tab.webView?.let { pushRuntimeConfig(tab, it) }
+        }
+        updateShieldIcon()
+        val active = tabManager.active
+        val site = active?.lockedSite ?: Urls.siteKeyOfUrl(active?.url)
+        when {
+            !enabled -> toastText(getString(R.string.site_lock_off_toast))
+            site != null -> toastText(getString(R.string.site_lock_on_toast, site))
+            else -> toastText(getString(R.string.site_lock_on_pending))
+        }
+    }
+
+    /** Re-applies a Site Lock change made in Settings when the user comes back. */
+    private fun syncSiteLockFromPrefs() {
+        tabManager.tabs.forEach { tab ->
+            if (!prefs.siteLockEnabled) {
+                tab.lockedSite = null
+                tab.lockedUrl = null
+                tab.allowSiteLockOnce = false
+                tab.siteLockRestoring = false
+            } else if (tab.lockedSite == null && !tab.isHome && Urls.isHttp(tab.url)) {
+                tab.lockedSite = Urls.siteKeyOfUrl(tab.url)
+                tab.lockedUrl = tab.url
+            }
+        }
+        tabManager.tabs.forEach { tab ->
+            tab.webView?.let { pushRuntimeConfig(tab, it) }
+        }
+        updateShieldIcon()
+    }
+
+    fun isSiteLockEnabled(): Boolean = prefs.siteLockEnabled
+
+    /**
+     * True when Site Lock must cancel this navigation. Same-site main-frame
+     * navigations are allowed; every other main-frame navigation (including
+     * app links, pop-ups and redirects) is refused.
+     */
+    fun isSiteLockBlocked(tab: BrowserTab, url: String, isMainFrame: Boolean = true): Boolean {
+        if (!prefs.siteLockEnabled || !isMainFrame) return false
+        if (url.isBlank() || Urls.isInternal(url)) return false
+        if (tab.isHome) return false
+        val locked = tab.lockedSite ?: return false
+        if (Urls.isHttp(url)) {
+            val target = Urls.siteKeyOfUrl(url) ?: return false
+            return target != locked
+        }
+        // In-page blob/data URLs and about:blank stay inside this tab.
+        if (url.startsWith("blob:", ignoreCase = true) ||
+            url.startsWith("data:", ignoreCase = true) ||
+            url.startsWith("about:", ignoreCase = true)
+        ) {
+            return false
+        }
+        // Anything else with a scheme (intent:, market:, mailto:, ...) leaves
+        // the page just as surely as a cross-site link.
+        return Urls.hasScheme(url) || Urls.isSpecialScheme(url)
+    }
+
+    fun onSiteLockBlocked(tab: BrowserTab, url: String) {
+        // The JS shim and the native layer can both report the same tap, and a
+        // hostile page could spam the bridge. One notice per moment is enough.
+        val now = System.currentTimeMillis()
+        if (now - lastSiteLockNoticeAt < 700) return
+        lastSiteLockNoticeAt = now
+        val site = tab.lockedSite ?: Urls.siteKeyOfUrl(tab.url).orEmpty()
+        shield.notifySiteLockBlocked(url, site)
+    }
+
+    /**
+     * Backstop for navigations that never reach shouldOverrideUrlLoading
+     * (server-side redirects, meta refresh with JavaScript disabled, ...).
+     * Returns true when the load was cancelled.
+     */
+    private fun enforceSiteLockOnStart(tab: BrowserTab, url: String): Boolean {
+        if (!prefs.siteLockEnabled || !Urls.isHttp(url)) return false
+        if (tab.allowSiteLockOnce) {
+            // Back/Forward is an explicit user action: let it move the lock.
+            tab.allowSiteLockOnce = false
+            tab.lockedSite = Urls.siteKeyOfUrl(url)
+            tab.lockedUrl = url
+            tab.webView?.let { pushRuntimeConfig(tab, it) }
+            return false
+        }
+        val locked = tab.lockedSite
+        if (locked == null) {
+            tab.lockedSite = Urls.siteKeyOfUrl(url)
+            tab.lockedUrl = url
+            tab.siteLockRestoring = false
+            return false
+        }
+        val target = Urls.siteKeyOfUrl(url) ?: return false
+        if (target == locked) {
+            tab.lockedUrl = url
+            tab.siteLockRestoring = false
+            return false
+        }
+        val view = tab.webView
+        view?.stopLoading()
+        onSiteLockBlocked(tab, url)
+        val restore = tab.lockedUrl
+        if (view != null && !restore.isNullOrBlank() && restore != url && !tab.siteLockRestoring) {
+            tab.siteLockRestoring = true
+            view.loadUrl(restore)
+        }
+        return true
     }
 
     private fun applyPrefsToAllTabs() {
@@ -684,34 +833,43 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
             val view = tab.webView ?: return@forEach
             view.applyPrefs(prefs, night)
             installShieldScripts(tab, view)
-            view.evaluateJavascript(shield.runtimeScript(tab.url), null)
+            pushRuntimeConfig(tab, view)
         }
     }
 
+    private fun pushRuntimeConfig(tab: BrowserTab, view: WebView) {
+        view.evaluateJavascript(shield.runtimeScript(tab.url, tab.lockedSite), null)
+        view.evaluateJavascript(ShieldScripts.dntRuntime(prefs.doNotTrack), null)
+    }
+
     private fun installShieldScripts(tab: BrowserTab, webView: WebView) {
-        tab.shieldHandler?.let { handler ->
-            runCatching { WebViewCompat.removeDocumentStartJavaScript(webView, handler) }
-        }
-        tab.dntHandler?.let { handler ->
-            runCatching { WebViewCompat.removeDocumentStartJavaScript(webView, handler) }
-        }
-        tab.shieldHandler = null
-        tab.dntHandler = null
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
-        tab.shieldHandler = runCatching {
-            WebViewCompat.addDocumentStartJavaScript(
-                webView,
-                ShieldScripts.documentStart(prefs.shieldEnabled, prefs.allowedSites),
-                setOf("*")
-            )
-        }.getOrNull()
-        tab.dntHandler = runCatching {
-            WebViewCompat.addDocumentStartJavaScript(
-                webView,
-                ShieldScripts.doNotTrack(prefs.doNotTrack),
-                setOf("*")
-            )
-        }.getOrNull()
+        // androidx.webkit has no public API for removing a document-start script,
+        // so each WebView installs it once. Settings changes are pushed to the
+        // page with runtimeConfig() instead of re-registering the script.
+        if (tab.shieldHandler == null) {
+            tab.shieldHandler = runCatching {
+                WebViewCompat.addDocumentStartJavaScript(
+                    webView,
+                    ShieldScripts.documentStart(
+                        prefs.shieldEnabled,
+                        prefs.allowedSites,
+                        prefs.siteLockEnabled && !tab.lockedSite.isNullOrBlank(),
+                        tab.lockedSite.orEmpty()
+                    ),
+                    setOf("*")
+                )
+            }.getOrNull()
+        }
+        if (tab.dntHandler == null) {
+            tab.dntHandler = runCatching {
+                WebViewCompat.addDocumentStartJavaScript(
+                    webView,
+                    ShieldScripts.doNotTrack(prefs.doNotTrack),
+                    setOf("*")
+                )
+            }.getOrNull()
+        }
     }
 
     override fun createTabView(tab: BrowserTab): AegisWebView {
@@ -719,9 +877,10 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
         webView.applyPrefs(prefs, isNight())
         webView.webViewClient = BrowserClient(this, tab, shield)
         webView.webChromeClient = BrowserChrome(this, tab, shield)
-        webView.setFindListener { active, total -> findBar.onResult(active, total) }
+        webView.setFindListener { active, total, _ -> findBar.onResult(active, total) }
         webView.addJavascriptInterface(BlobBridge(this).also { tab.blobBridge = it }, "AegisBlob")
         webView.addJavascriptInterface(HomeBridge(this, tab), "AegisHome")
+        webView.addJavascriptInterface(SiteLockBridge(this, tab), "AegisLock")
         webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             handleDownload(tab, url, userAgent, contentDisposition, mimeType)
         }
@@ -813,17 +972,40 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
     private fun updateShieldIcon() {
         val tab = tabManager.active
         val on = prefs.shieldEnabled && !prefs.isSiteAllowed(Urls.host(tab?.url))
+        val locked = prefs.siteLockEnabled && !tab?.lockedSite.isNullOrBlank()
         binding.shieldButton.setIconResource(
-            if (on) R.drawable.ic_shield else R.drawable.ic_shield_off
+            when {
+                locked -> R.drawable.ic_lock
+                on -> R.drawable.ic_shield
+                else -> R.drawable.ic_shield_off
+            }
         )
         binding.shieldButton.setIconTintResource(
-            if (on) R.color.primary else R.color.on_surface_variant
+            if (on || locked) R.color.primary else R.color.on_surface_variant
         )
+        binding.shieldButton.contentDescription = when {
+            locked -> getString(R.string.site_lock)
+            on -> getString(R.string.cd_shield)
+            else -> getString(R.string.shield_off)
+        }
     }
 
     fun onPageStarted(tab: BrowserTab, url: String) {
-        tab.isLoading = true
         val internal = Urls.isInternal(url)
+        if (Urls.isHome(url)) {
+            // Returning to the built-in home page releases the lock target, just
+            // like pressing the Home button does.
+            tab.isHome = true
+            tab.lockedSite = null
+            tab.lockedUrl = null
+            tab.allowSiteLockOnce = false
+            tab.siteLockRestoring = false
+        }
+        if (!internal && enforceSiteLockOnStart(tab, url)) {
+            tab.isLoading = false
+            return
+        }
+        tab.isLoading = true
         if (!internal) {
             tab.url = url
             tab.isHome = false
@@ -841,19 +1023,35 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
             val view = tab.webView ?: return
             if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 view.evaluateJavascript(
-                    ShieldScripts.documentStart(prefs.shieldEnabled, prefs.allowedSites),
+                    ShieldScripts.documentStart(
+                        prefs.shieldEnabled,
+                        prefs.allowedSites,
+                        prefs.siteLockEnabled && !tab.lockedSite.isNullOrBlank(),
+                        tab.lockedSite.orEmpty()
+                    ),
                     null
                 )
             }
-            view.evaluateJavascript(shield.runtimeScript(url), null)
+            pushRuntimeConfig(tab, view)
         }
     }
 
     fun onPageFinished(tab: BrowserTab, url: String) {
         tab.isLoading = false
         if (!Urls.isInternal(url)) {
-            tab.url = url
-            tab.isHome = false
+            val locked = tab.lockedSite
+            val target = Urls.siteKeyOfUrl(url)
+            val crossed = prefs.siteLockEnabled && locked != null &&
+                target != null && target != locked
+            if (!crossed) {
+                tab.url = url
+                tab.isHome = false
+            }
+        }
+        if (prefs.siteLockEnabled && !Urls.isInternal(url)) {
+            val target = Urls.siteKeyOfUrl(url)
+            if (target != null && target == tab.lockedSite) tab.siteLockRestoring = false
+            tab.webView?.let { pushRuntimeConfig(tab, it) }
         }
         if (tab == tabManager.active) {
             binding.progressBar.visibility = View.INVISIBLE
@@ -873,8 +1071,36 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
 
     fun onUrlCommitted(tab: BrowserTab, url: String) {
         if (Urls.isInternal(url)) return
+        if (prefs.siteLockEnabled) {
+            val locked = tab.lockedSite
+            val target = Urls.siteKeyOfUrl(url)
+            if (locked != null && target != null && target != locked) {
+                // A cross-site commit slipped past the earlier checks. Never let
+                // it become the tab's page: jump back to the locked site.
+                val restore = tab.lockedUrl
+                if (!tab.siteLockRestoring && !restore.isNullOrBlank() && restore != url) {
+                    tab.siteLockRestoring = true
+                    onSiteLockBlocked(tab, url)
+                    tab.webView?.loadUrl(restore)
+                }
+                return
+            }
+        }
         tab.url = url
         tab.isHome = false
+        if (prefs.siteLockEnabled) {
+            val target = Urls.siteKeyOfUrl(url)
+            if (tab.lockedSite == null && target != null) {
+                tab.lockedSite = target
+                tab.lockedUrl = url
+                tab.siteLockRestoring = false
+            } else if (target != null && target == tab.lockedSite) {
+                tab.lockedUrl = url
+                tab.siteLockRestoring = false
+            }
+            tab.allowSiteLockOnce = false
+            tab.webView?.let { pushRuntimeConfig(tab, it) }
+        }
         if (tab == tabManager.active) {
             shield.onCommitted(url)
             updateAddressBar()
@@ -1336,12 +1562,17 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
 
     private fun showBlockedSnackbar(blocked: NavigationShield.Blocked) {
         if (isFinishing || isDestroyed) return
+        if (blocked.kind == NavigationShield.Kind.SITE_LOCK) {
+            showSiteLockSnackbar(blocked)
+            return
+        }
         val message = when (blocked.kind) {
             NavigationShield.Kind.POPUP -> getString(R.string.shield_blocked_popup)
             NavigationShield.Kind.REDIRECT ->
                 getString(R.string.shield_blocked_redirect, blocked.host)
             NavigationShield.Kind.APP_LINK ->
                 getString(R.string.shield_blocked_app, blocked.host)
+            else -> getString(R.string.shield_blocked_popup)
         }
         Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG)
             .setAction(R.string.allow) {
@@ -1353,6 +1584,24 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
                         if (blocked.url.isNotBlank()) navigateActive(blocked.url)
                     }
                 }
+            }
+            .show()
+    }
+
+    private fun showSiteLockSnackbar(blocked: NavigationShield.Blocked) {
+        if (isFinishing || isDestroyed) return
+        val site = blocked.fromHost?.takeIf { it.isNotBlank() }
+            ?: Urls.siteKeyOfUrl(tabManager.active?.url)
+            ?: getString(R.string.this_site)
+        Snackbar.make(
+            binding.root,
+            getString(R.string.site_lock_blocked, site),
+            Snackbar.LENGTH_LONG
+        )
+            .setAction(R.string.site_lock_unlock) {
+                // Deliberately do not follow the blocked URL: it is usually an
+                // ad. The user can tap the link again after unlocking.
+                setSiteLock(false)
             }
             .show()
     }
@@ -1391,6 +1640,10 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
 
     private fun toast(resId: Int) {
         Toast.makeText(this, resId, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun toastText(text: String) {
+        Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
     }
 
     override fun onPause() {

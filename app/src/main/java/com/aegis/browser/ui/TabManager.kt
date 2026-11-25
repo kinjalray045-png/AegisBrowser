@@ -128,8 +128,6 @@ class TabManager(
         tab.webView?.let { webView ->
             runCatching {
                 webView.stopLoading()
-                webView.webChromeClient = null
-                webView.webViewClient = null
                 (webView.parent as? ViewGroup)?.removeView(webView)
                 webView.destroy()
             }

@@ -72,6 +72,12 @@ class SettingsActivity : AppCompatActivity() {
         ) { prefs.shieldEnabled = it }
         addSwitch(
             privacy,
+            R.string.site_lock,
+            R.string.site_lock_desc,
+            prefs.siteLockEnabled
+        ) { prefs.siteLockEnabled = it }
+        addSwitch(
+            privacy,
             R.string.blocked_popups,
             R.string.blocked_popups_desc,
             prefs.shieldPopups

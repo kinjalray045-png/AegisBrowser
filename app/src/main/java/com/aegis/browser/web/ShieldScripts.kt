@@ -12,31 +12,89 @@ import org.json.JSONObject
  */
 object ShieldScripts {
 
-    fun documentStart(enabled: Boolean, allowlist: Set<String>): String {
+    fun documentStart(
+        enabled: Boolean,
+        allowlist: Set<String>,
+        siteLock: Boolean,
+        lockedSite: String
+    ): String {
         val allowJson = JSONArray(allowlist.toList()).toString()
+        val lockJson = JSONObject.quote(lockedSite)
         return """
 (function () {
   try {
     var ALLOW = $allowJson;
     var ON = $enabled;
+    var LOCK = $siteLock;
+    window.__aegisAllow = ALLOW;
+    window.__aegisSiteLock = LOCK;
+    window.__aegisLockKey = $lockJson;
+
     function hostAllowed() {
       try {
         var h = (location.hostname || '').toLowerCase();
         if (!h) return false;
-        for (var i = 0; i < ALLOW.length; i++) {
-          var a = ALLOW[i];
+        var list = window.__aegisAllow || ALLOW;
+        for (var i = 0; i < list.length; i++) {
+          var a = list[i];
           if (!a) continue;
           if (h === a || h.slice(-(a.length + 1)) === '.' + a) return true;
         }
       } catch (e) {}
       return false;
     }
+    window.__aegisHostAllowed = hostAllowed;
     window.__aegisShieldOn = !!ON && !hostAllowed();
+
+    // Site Lock: the registrable domain the user pinned this tab to. A host
+    // belongs to the site when it is the site itself or a subdomain of it.
+    function hostInSite(host, site) {
+      try {
+        host = (host || '').toLowerCase().replace(/^www\./, '');
+        site = (site || '').toLowerCase().replace(/^www\./, '');
+        if (!site || !host) return true;
+        return host === site || host.slice(-(site.length + 1)) === '.' + site;
+      } catch (e) {
+        return true;
+      }
+    }
+    window.__aegisHostInSite = hostInSite;
+
+    function sameSiteHref(href) {
+      if (!href) return true;
+      var raw = String(href).trim();
+      if (!raw || raw.charAt(0) === '#') return true;
+      if (/^javascript:/i.test(raw)) return true;
+      var url;
+      try { url = new URL(raw, location.href); } catch (e) { return true; }
+      // blob:/data:/about: stay inside this tab and this origin.
+      if (url.protocol === 'blob:' || url.protocol === 'data:' || url.protocol === 'about:') return true;
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+      return hostInSite(url.hostname, window.__aegisLockKey);
+    }
+    window.__aegisSameSiteHref = sameSiteHref;
+
     if (window.__aegisShieldInstalled) return;
     window.__aegisShieldInstalled = true;
 
     var realOpen = window.open;
-    var guardedOpen = function () {
+    var guardedOpen = function (url) {
+      if (window.__aegisSiteLock) {
+        var target = '';
+        try {
+          target = url ? new URL(String(url), location.href).href : '';
+        } catch (e) {
+          target = String(url || '');
+        }
+        // Same-site pop-ups open in this tab; cross-site ones are dropped.
+        if (target && sameSiteHref(target)) {
+          try { location.href = target; } catch (e) {}
+          return null;
+        }
+        try { if (window.AegisLock && target) window.AegisLock.blocked(target); } catch (e) {}
+        try { console.log('Aegis Site Lock: pop-up blocked'); } catch (e) {}
+        return null;
+      }
       if (window.__aegisShieldOn) {
         try { console.log('Aegis: pop-up blocked'); } catch (e) {}
         return null;
@@ -54,7 +112,7 @@ object ShieldScripts {
     }
 
     function killRefresh() {
-      if (!window.__aegisShieldOn) return;
+      if (!window.__aegisShieldOn && !window.__aegisSiteLock) return;
       try {
         var metas = document.querySelectorAll('meta[http-equiv]');
         for (var i = 0; i < metas.length; i++) {
@@ -74,13 +132,36 @@ object ShieldScripts {
       setTimeout(function () { pending = false; killRefresh(); }, 150);
     }
 
-    // A user tap on a target=_blank link should stay in this tab instead of
-    // becoming a pop-up window.
+    // Site Lock runs first and independently of the shield: a tap that lands on
+    // a hidden ad overlay is cancelled before the page can navigate. Then the
+    // shield keeps target=_blank taps in this tab.
     document.addEventListener('click', function (e) {
-      if (!window.__aegisShieldOn) return;
       var el = e.target;
-      while (el && el.tagName !== 'A') el = el.parentElement;
+      while (el && (!el.tagName || el.tagName.toUpperCase() !== 'A')) {
+        el = el.parentElement;
+      }
       if (!el) return;
+
+      if (window.__aegisSiteLock) {
+        var href = el.getAttribute('href') || '';
+        if (href && !sameSiteHref(href)) {
+          e.preventDefault();
+          e.stopPropagation();
+          try {
+            var abs = new URL(href, location.href).href;
+            if (window.AegisLock) window.AegisLock.blocked(abs);
+          } catch (err) {}
+          try { console.log('Aegis Site Lock: blocked link to another site'); } catch (err) {}
+          return;
+        }
+        var lockTarget = (el.getAttribute('target') || '').toLowerCase();
+        if (lockTarget && lockTarget !== '_self' &&
+            lockTarget !== '_top' && lockTarget !== '_parent') {
+          el.setAttribute('target', '_self');
+        }
+      }
+
+      if (!window.__aegisShieldOn) return;
       var t = (el.getAttribute('target') || '').toLowerCase();
       if (t && t !== '_self' && t !== '_top' && t !== '_parent') {
         el.setAttribute('target', '_self');
@@ -100,7 +181,31 @@ object ShieldScripts {
         """.trimIndent()
     }
 
-    fun runtimeFlag(enabled: Boolean): String = "window.__aegisShieldOn = $enabled;"
+    /**
+     * Pushes shield and Site Lock settings into an already-loaded page. The
+     * document-start script reads the window.__aegis* globals dynamically, so
+     * no re-registration is needed when the user toggles either feature.
+     */
+    fun runtimeConfig(
+        enabled: Boolean,
+        allowlist: Set<String>,
+        siteLock: Boolean,
+        lockedSite: String
+    ): String {
+        val allowJson = JSONArray(allowlist.toList()).toString()
+        val lockJson = JSONObject.quote(lockedSite)
+        return """
+(function () {
+  try {
+    window.__aegisAllow = $allowJson;
+    window.__aegisSiteLock = $siteLock;
+    window.__aegisLockKey = $lockJson;
+    var hostAllowed = window.__aegisHostAllowed;
+    window.__aegisShieldOn = $enabled && !(hostAllowed ? hostAllowed() : false);
+  } catch (e) {}
+})();
+        """.trimIndent()
+    }
 
     fun doNotTrack(enabled: Boolean): String = """
 (function () {
@@ -120,6 +225,8 @@ object ShieldScripts {
   } catch (e) {}
 })();
     """.trimIndent()
+
+    fun dntRuntime(enabled: Boolean): String = "window.__aegisDntOn = $enabled;"
 
     fun blobFetcher(blobUrl: String, token: String, name: String): String = """
 (function () {

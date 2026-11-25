@@ -20,6 +20,22 @@ class BrowserTab(
     var lastActive: Long = System.currentTimeMillis()
     var isPopup: Boolean = false
 
+    /**
+     * Registrable domain ("site key") this tab is pinned to while Site Lock is
+     * on. Null means the lock is not anchored yet; the first real page the tab
+     * commits becomes the anchor.
+     */
+    var lockedSite: String? = null
+
+    /** Last URL that belonged to [lockedSite]; used to restore after a block. */
+    var lockedUrl: String? = null
+
+    /** Set while an explicit Back/Forward navigation is allowed to move the lock. */
+    var allowSiteLockOnce: Boolean = false
+
+    /** True while a cross-site load is being reverted, to prevent restore loops. */
+    var siteLockRestoring: Boolean = false
+
     val displayUrl: String
         get() = if (isHome) "" else url
 
