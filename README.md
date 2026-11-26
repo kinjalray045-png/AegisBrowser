@@ -63,7 +63,7 @@ If document-start scripts are unavailable, the shim is re-injected on page start
 - Error page with retry
 - Light, dark and system themes
 - Share targets: opens `http(s)` links, web search intents and shared text
-- Swipe to refresh
+- Refresh from the toolbar (pull-to-refresh is off, so scrolling never reloads a page)
 
 ## Project layout
 

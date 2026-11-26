@@ -269,17 +269,12 @@ class BrowserActivity : AppCompatActivity(), TabManager.Host {
             loadHomeActive()
         }
 
-        binding.swipeRefresh.setColorSchemeColors(
-            ContextCompat.getColor(this, R.color.primary)
-        )
-        binding.swipeRefresh.setOnRefreshListener {
-            val tab = tabManager.active
-            if (tab == null || tab.isHome) {
-                binding.swipeRefresh.isRefreshing = false
-            } else {
-                tab.webView?.reload()
-            }
-        }
+        // Pull-to-refresh is deliberately off. A normal upward scroll (or a
+        // slightly downward drag while reading near the top of a page) was
+        // being read as a refresh gesture and reloaded the page. Refresh stays
+        // available from the toolbar button and the menu.
+        binding.swipeRefresh.isEnabled = false
+        binding.swipeRefresh.isRefreshing = false
     }
 
     private fun setupBack() {
